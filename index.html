@@ -358,16 +358,29 @@ function applySpring(l) {
   if (b.body && !b.body.static) { b.body.fx += F * nx; b.body.fy += F * ny; }
   if (a.body && !a.body.static) { a.body.fx -= F * nx; a.body.fy -= F * ny; }
 }
-function solveRod(l, h, first) {
+// Rods use SHAKE (position) + RATTLE (velocity) so a frictionless pendulum keeps its energy.
+function shakeRod(l, h) {
+  const a = ep(l.a), b = ep(l.b); if (!a || !b) return;
+  const ws = a.w + b.w; if (ws === 0) return;
+  let nx = l._nx, ny = l._ny;
+  const dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy;
+  let lam;
+  if (nx === undefined) { const len = Math.sqrt(d2) || 1; nx = dx / len; ny = dy / len; lam = l.L - len; }
+  else {
+    const dn = dx * nx + dy * ny, disc = dn * dn - (d2 - l.L * l.L);
+    if (disc >= 0) lam = -dn + Math.sqrt(disc);
+    else { const len = Math.sqrt(d2) || 1; nx = dx / len; ny = dy / len; lam = l.L - len; }
+  }
+  const cb = lam * b.w / ws, ca = lam * a.w / ws;
+  if (b.body) { b.body.x += nx * cb; b.body.y += ny * cb; b.body.vx += nx * cb / h; b.body.vy += ny * cb / h; }
+  if (a.body) { a.body.x -= nx * ca; a.body.y -= ny * ca; a.body.vx -= nx * ca / h; a.body.vy -= ny * ca / h; }
+}
+function rattleRod(l, h, first) {
   const a = ep(l.a), b = ep(l.b); if (!a || !b) return;
   const ws = a.w + b.w; if (ws === 0) return;
   let dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy); if (len < 1e-9) { dx = 0; dy = -1; len = 1; }
-  const nx = dx / len, ny = dy / len, C = len - l.L;
-  const corr = C / ws;
-  if (a.body) { a.body.x += nx * corr * a.w; a.body.y += ny * corr * a.w; }
-  if (b.body) { b.body.x -= nx * corr * b.w; b.body.y -= ny * corr * b.w; }
-  const vrel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
-  const j = vrel / ws;
+  const nx = dx / len, ny = dy / len;
+  const vrel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny, j = vrel / ws;
   if (a.body) { a.body.vx += nx * j * a.w; a.body.vy += ny * j * a.w; }
   if (b.body) { b.body.vx -= nx * j * b.w; b.body.vy -= ny * j * b.w; }
   if (first && l.c > 0 && b.body) {
@@ -448,12 +461,15 @@ function resolveBounds(h) {
   }
 }
 function step(h) {
-  // velocity Verlet: exact for constant gravity, energy-stable for springs
+  // velocity Verlet with SHAKE/RATTLE rod constraints: exact for constant gravity,
+  // energy-stable for springs and pendulums
   computeForces();
-  for (const b of state.bodies) { if (b.static) continue; b.ax = b.fx / b.m; b.ay = b.fy / b.m; b.x += b.vx * h + .5 * b.ax * h * h; b.y += b.vy * h + .5 * b.ay * h * h; }
+  for (const l of state.links) if (l.type === 'rod') { const a = ep(l.a), b = ep(l.b); if (!a || !b) { l._nx = undefined; continue; } const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy); if (len > 1e-9) { l._nx = dx / len; l._ny = dy / len; } else l._nx = undefined; }
+  for (const b of state.bodies) { if (b.static) continue; const ax = b.fx / b.m, ay = b.fy / b.m; b.x += b.vx * h + .5 * ax * h * h; b.y += b.vy * h + .5 * ay * h * h; b.vx += .5 * ax * h; b.vy += .5 * ay * h; }
+  for (let i = 0; i < 8; i++) for (const l of state.links) if (l.type === 'rod') shakeRod(l, h);
   computeForces();
-  for (const b of state.bodies) { if (b.static) continue; b.vx += .5 * (b.ax + b.fx / b.m) * h; b.vy += .5 * (b.ay + b.fy / b.m) * h; }
-  for (let i = 0; i < 4; i++) for (const l of state.links) if (l.type === 'rod') solveRod(l, h, i === 0);
+  for (const b of state.bodies) { if (b.static) continue; b.vx += .5 * b.fx / b.m * h; b.vy += .5 * b.fy / b.m * h; }
+  for (let i = 0; i < 8; i++) for (const l of state.links) if (l.type === 'rod') rattleRod(l, h, i === 0);
   for (let i = 0; i < 3; i++) resolveCollisions();
   resolveBounds(h);
   state.t += h; state.stepCount++;
@@ -492,7 +508,7 @@ function loadScene(scene) {
   colorIdx = state.bodies.length;
   clearMotionHistory(); fitView(); updatePlayUI(); renderWorldPanel(); changed();
 }
-function sceneJSON() { return { v: 1, world: state.world, bodies: state.bodies.map(({ trail, fx, fy, ax, ay, ...b }) => b), links: state.links }; }
+function sceneJSON() { return { v: 1, world: state.world, bodies: state.bodies.map(({ trail, fx, fy, ...b }) => b), links: state.links.map(({ _nx, _ny, ...l }) => l) }; }
 function reset() {
   if (!state.snapshot) return;
   state.running = false; state.t = 0;
